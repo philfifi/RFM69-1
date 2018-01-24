@@ -114,11 +114,13 @@ class RFM69(object):
             time.sleep(0.1)
 
         #verify chip is syncing?
+        logger.debug(">> syncing")
         while self.readReg(REG_SYNCVALUE1) != 0xAA:
             self.writeReg(REG_SYNCVALUE1, 0xAA)
 
         while self.readReg(REG_SYNCVALUE1) != 0x55:
             self.writeReg(REG_SYNCVALUE1, 0x55)
+        logger.debug("<< syncing")
 
         #write config
         for value in self.CONFIG.values():
@@ -263,6 +265,7 @@ class RFM69(object):
         self.setMode(RF69_MODE_RX)
 
     def interruptHandler(self, pin):
+        logger.debug(">>> Interrupt")
         self.intLock = True
         self.DATASENT = True
         if self.mode == RF69_MODE_RX and self.readReg(REG_IRQFLAGS2) & RF_IRQFLAGS2_PAYLOADREADY:
