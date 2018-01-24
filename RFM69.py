@@ -3,11 +3,12 @@
 from RFM69py.RFM69registers import *
 
 import spidev
-import RPi.GPIO as GPIO
+import OPi.GPIO as GPIO
 import time
+EPSILON = 0.0001
 
 class RFM69(object):
-    def __init__(self, freqBand, nodeID, networkID, isRFM69HW = False, intPin = 18, rstPin = 28, spiBus = 0, spiDevice = 0):
+    def __init__(self, freqBand, nodeID, networkID, isRFM69HW = False, intPin = 18, rstPin = None, spiBus = 0, spiDevice = 0):
 
         self.freqBand = freqBand
         self.address = nodeID
@@ -30,9 +31,10 @@ class RFM69(object):
         self.RSSI = 0
         self.DATA = []
 
-        GPIO.setmode(GPIO.BOARD)
+        GPIO.setmode(GPIO.SUNXI)
         GPIO.setup(self.intPin, GPIO.IN)
-        GPIO.setup(self.rstPin, GPIO.OUT)
+        if self.rstPin is not None:
+            GPIO.setup(self.rstPin, GPIO.OUT)
 
         frfMSB = {RF69_315MHZ: RF_FRFMSB_315, RF69_433MHZ: RF_FRFMSB_433,
                   RF69_868MHZ: RF_FRFMSB_868, RF69_915MHZ: RF_FRFMSB_915}
@@ -101,10 +103,11 @@ class RFM69(object):
         self.spi.max_speed_hz = 4000000
 
         # Hard reset the RFM module
-        GPIO.output(self.rstPin, GPIO.HIGH);
-        time.sleep(0.1)
-        GPIO.output(self.rstPin, GPIO.LOW);
-        time.sleep(0.1)
+        if self.rstPin is not None:
+            GPIO.output(self.rstPin, GPIO.HIGH);
+            time.sleep(0.1)
+            GPIO.output(self.rstPin, GPIO.LOW);
+            time.sleep(0.1)
 
         #verify chip is syncing?
         while self.readReg(REG_SYNCVALUE1) != 0xAA:
@@ -131,7 +134,7 @@ class RFM69(object):
         self.writeReg(REG_FRFMID, FRF >> 8)
         self.writeReg(REG_FRFLSB, FRF)
 
-    def setMode(self, newMode):
+    def setMode(self, newMode, waitReady=False):
         if newMode == self.mode:
             return
 
@@ -154,8 +157,9 @@ class RFM69(object):
 
         # we are using packet mode, so this check is not really needed
         # but waiting for mode ready is necessary when going from sleep because the FIFO may not be immediately available from previous mode
-        while self.mode == RF69_MODE_SLEEP and self.readReg(REG_IRQFLAGS1) & RF_IRQFLAGS1_MODEREADY == 0x00:
-            pass
+        if self.mode == RF69_MODE_SLEEP or waitReady:
+            while self.readReg(REG_IRQFLAGS1) & RF_IRQFLAGS1_MODEREADY == 0x00:
+                time.sleep(EPSILON)
 
         self.mode = newMode;
 
@@ -191,7 +195,8 @@ class RFM69(object):
         now = time.time()
         while (not self.canSend()) and time.time() - now < RF69_CSMA_LIMIT_S:
             self.receiveDone()
-        self.sendFrame(toAddress, buff, requestACK, False)
+            time.sleep(EPSILON)
+        self.sendFrame(toAddress, buff, requestACK, sendACK=False)
 
 #    to increase the chance of getting a packet across, call this function instead of send
 #    and it handles all the ACK requesting/retrying for you :)
@@ -202,11 +207,12 @@ class RFM69(object):
 
     def sendWithRetry(self, toAddress, buff = "", retries = 3, retryWaitTime = 10):
         for i in range(0, retries):
-            self.send(toAddress, buff, True)
+            self.send(toAddress, buff, requestACK=True)
             sentTime = time.time()
             while (time.time() - sentTime) * 1000 < retryWaitTime:
                 if self.ACKReceived(toAddress):
                     return True
+                time.sleep(EPSILON)
         return False
 
     def ACKReceived(self, fromNodeID):
@@ -221,14 +227,15 @@ class RFM69(object):
         toAddress = toAddress if toAddress > 0 else self.SENDERID
         while not self.canSend():
             self.receiveDone()
-        self.sendFrame(toAddress, buff, False, True)
+            time.sleep(EPSILON)
+        self.sendFrame(toAddress, buff, requestACK=False, sendACK=True)
 
     def sendFrame(self, toAddress, buff, requestACK, sendACK):
         #turn off receiver to prevent reception while filling fifo
         self.setMode(RF69_MODE_STANDBY)
         #wait for modeReady
         while (self.readReg(REG_IRQFLAGS1) & RF_IRQFLAGS1_MODEREADY) == 0x00:
-            pass
+            time.sleep(EPSILON)
         # DIO0 is "Packet Sent"
         self.writeReg(REG_DIOMAPPING1, RF_DIOMAPPING1_DIO0_00)
 
@@ -240,10 +247,7 @@ class RFM69(object):
             ack = 0x80
         elif requestACK:
             ack = 0x40
-        if isinstance(buff, basestring):
-            self.spi.xfer2([REG_FIFO | 0x80, len(buff) + 3, toAddress, self.address, ack] + [int(ord(i)) for i in list(buff)])
-        else:
-            self.spi.xfer2([REG_FIFO | 0x80, len(buff) + 3, toAddress, self.address, ack] + buff)
+        self.spi.xfer2([REG_FIFO | 0x80, len(buff) + 3, toAddress, self.address, ack] + buff)
 
         startTime = time.time()
         self.DATASENT = False
@@ -251,6 +255,7 @@ class RFM69(object):
         while not self.DATASENT:
             if time.time() - startTime > 1.0:
                 break
+            time.sleep(EPSILON)
         self.setMode(RF69_MODE_RX)
 
     def interruptHandler(self, pin):
@@ -269,7 +274,10 @@ class RFM69(object):
             self.ACK_RECEIVED = CTLbyte & 0x80
             self.ACK_REQUESTED = CTLbyte & 0x40
 
-            self.DATA = self.spi.xfer2([REG_FIFO & 0x7f] + [0 for i in range(0, self.DATALEN)])[1:]
+            if self.DATALEN > 0:
+                self.DATA = self.spi.xfer2([REG_FIFO & 0x7f] + [0 for i in range(0, self.DATALEN)])[1:]
+            else:
+                self.DATA = []
 
             self.RSSI = self.readRSSI()
         self.intLock = False
@@ -312,7 +320,7 @@ class RFM69(object):
         if forceTrigger:
             self.writeReg(REG_RSSICONFIG, RF_RSSI_START)
             while self.readReg(REG_RSSICONFIG) & RF_RSSI_DONE == 0x00:
-                pass
+                time.sleep(EPSILON)
         rssi = self.readReg(REG_RSSIVALUE) * -1
         rssi = rssi >> 1
         return rssi
@@ -362,7 +370,7 @@ class RFM69(object):
         self.setMode(RF69_MODE_STANDBY)
         self.writeReg(REG_TEMP1, RF_TEMP1_MEAS_START)
         while self.readReg(REG_TEMP1) & RF_TEMP1_MEAS_RUNNING:
-            pass
+            time.sleep(EPSILON)
         # COURSE_TEMP_COEF puts reading in the ballpark, user can add additional correction
         #'complement'corrects the slope, rising temp = rising val
         return (int(~self.readReg(REG_TEMP2)) * -1) + COURSE_TEMP_COEF + calFactor
@@ -371,7 +379,7 @@ class RFM69(object):
     def rcCalibration(self):
         self.writeReg(REG_OSC1, RF_OSC1_RCCAL_START)
         while self.readReg(REG_OSC1) & RF_OSC1_RCCAL_DONE == 0x00:
-            pass
+            time.sleep(EPSILON)
 
     def shutdown(self):
         self.setHighPower(False)
