@@ -6,6 +6,7 @@ import spidev
 import OPi.GPIO as GPIO
 import time
 import queue
+from threading import Thread
 import logging
 logger = logging.getLogger(__name__)
 logger.addHandler(logging.NullHandler())
@@ -24,15 +25,29 @@ class RFPacket(object):
     def isAck(self):
         return len(self.data) == 0 and self.CTL & 0x80
 
-    def wantsAck(self):
+    def requestAck(self):
         return self.CTL & 0x40
 
     def __str__(self):
-        return "From={} To={} RSSI={} isAck={} wantsAck={} data={}".format( \
-            self.senderID, self.targetID, self.rssi, bool(self.isAck()), bool(self.wantsAck()), self.data)
+        return "From={} To={} RSSI={} isAck={} requestAck={} data={}".format( \
+            self.senderID, self.targetID, self.rssi, bool(self.isAck()), bool(self.requestAck()), self.data)
 
 
-#class RFM69PacketSender(self):
+class RFM69AckSender(Thread):
+    def __init__(self, q, sendACK):
+        Thread.__init__(self)
+        self.q = q
+        self.sendACK = sendACK
+        self.start()
+
+    def run(self):
+        logger.info("Ack sender started")
+        while True:
+            p_ack = self.q.get()
+            logger.debug("Sending Ack to ID=%d" % p_ack.senderID)
+            self.sendACK(p_ack.senderID)
+
+
 
 
 
@@ -40,7 +55,7 @@ class RFM69(object):
     def __init__(self, freqBand, nodeID, networkID, isRFM69HW = False, intPin = 18, rstPin = None, spiBus = 0, spiDevice = 0):
 
         self.freqBand = freqBand
-        self.address = nodeID
+        self.nodeID = nodeID
         self.networkID = networkID
         self.isRFM69HW = isRFM69HW
         self.intPin = intPin
@@ -161,10 +176,12 @@ class RFM69(object):
         # Wait for ModeReady
         self.setMode(RF69_MODE_STANDBY, waitReady=True)
 
+        self.ack_sender = RFM69AckSender(self.send_ack_queue, self.sendACK)
+
         GPIO.remove_event_detect(self.intPin)
         GPIO.add_event_detect(self.intPin, GPIO.RISING, callback=self.interruptHandler)
 
-    def setFreqeuncy(self, FRF):
+    def setFrequency(self, FRF):
         self.writeReg(REG_FRFMSB, FRF >> 16)
         self.writeReg(REG_FRFMID, FRF >> 8)
         self.writeReg(REG_FRFLSB, FRF)
@@ -202,8 +219,8 @@ class RFM69(object):
         self.setMode(RF69_MODE_SLEEP)
 
     def setAddress(self, addr):
-        self.address = addr
-        self.writeReg(REG_NODEADRS, self.address)
+        self.nodeID = addr
+        self.writeReg(REG_NODEADRS, self.nodeID)
 
     def setNetwork(self, networkID):
         self.networkID = networkID
@@ -283,10 +300,9 @@ class RFM69(object):
                 logger.info("Retring !")
         return good
 
-    def sendACK(self, toAddress = 0, buff = ""):
+    def sendACK(self, toAddress = 0, buff=[]):
         toAddress = toAddress if toAddress > 0 else self.SENDERID
         while not self.canSend():
-            self.receiveDone()
             time.sleep(EPSILON)
         self.sendFrame(toAddress, buff, requestACK=False, sendACK=True)
 
@@ -304,7 +320,7 @@ class RFM69(object):
 
         data = [len(buff) + 3,
                 toAddress,
-                self.address,
+                self.nodeID,
                 ack] + buff
 
         # DIO0 is "Packet Sent"
@@ -390,11 +406,14 @@ class RFM69(object):
         if self.mode == RF69_MODE_RX and irqflags2 & RF_IRQFLAGS2_PAYLOADREADY:
             p = self.fetch_packet()
             p.rssi = rssi
-#            logger.debug(p)
+            logger.info(p)
             if p.isAck():
                 self.recv_ack_queue.put(p)
             else:
-                self.pk_queue.put(p)
+                if p.targetID in [self.nodeID, RF69_BROADCAST_ADDR] or self.promiscuousMode:
+                    self.pk_queue.put(p)
+                    if p.requestAck() and p.targetID == self.nodeID:
+                        self.send_ack_queue.put(p)
         else:
             logger.info("No packet to fetch in the interrupt")
 
