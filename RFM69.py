@@ -5,6 +5,10 @@ from RFM69py.RFM69registers import *
 import spidev
 import OPi.GPIO as GPIO
 import time
+import logging
+logger = logging.getLogger(__name__)
+logger.addHandler(logging.NullHandler())
+
 EPSILON = 0.0001
 
 class RFM69(object):
