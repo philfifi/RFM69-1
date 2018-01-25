@@ -273,6 +273,9 @@ class RFM69(object):
                 return False
             time.sleep(EPSILON)
 
+    def getRecvPacket(self, *args, **kwargs):
+        return self.pk_queue.get(*args, **kwargs)
+
     def send(self, toAddress, buff = "", requestACK = False, retryWaitTime=DEFAULT_RETRY_WAIT_TIME_MS):
         self.writeReg(REG_PACKETCONFIG2, (self.readReg(REG_PACKETCONFIG2) & 0xFB) | RF_PACKET2_RXRESTART)
         if not self.waitCanSend():
