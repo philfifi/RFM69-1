@@ -38,6 +38,7 @@ class RFM69AckSender(Thread):
         Thread.__init__(self)
         self.q = q
         self.sendACK = sendACK
+        self.daemon = True
         self.start()
 
     def run(self):
@@ -186,24 +187,29 @@ class RFM69(object):
         self.writeReg(REG_FRFMID, FRF >> 8)
         self.writeReg(REG_FRFLSB, FRF)
 
-    def setMode(self, newMode, waitReady=False):
+    def setMode(self, newMode, waitReady=False, sequencer=True):
         if newMode == self.mode:
             return
 
+        if sequencer:
+            sequencer_val = RF_OPMODE_SEQUENCER_ON
+        else:
+            sequencer_val = RF_OPMODE_SEQUENCER_OFF
+
         if newMode == RF69_MODE_TX:
-            self.writeReg(REG_OPMODE, (self.readReg(REG_OPMODE) & 0xE3) | RF_OPMODE_TRANSMITTER)
+            self.writeReg(REG_OPMODE, sequencer_val | RF_OPMODE_TRANSMITTER)
             if self.isRFM69HW:
                 self.setHighPowerRegs(True)
         elif newMode == RF69_MODE_RX:
-            self.writeReg(REG_OPMODE, (self.readReg(REG_OPMODE) & 0xE3) | RF_OPMODE_RECEIVER)
+            self.writeReg(REG_OPMODE, sequencer_val | RF_OPMODE_RECEIVER)
             if self.isRFM69HW:
                 self.setHighPowerRegs(False)
         elif newMode == RF69_MODE_SYNTH:
-            self.writeReg(REG_OPMODE, (self.readReg(REG_OPMODE) & 0xE3) | RF_OPMODE_SYNTHESIZER)
+            self.writeReg(REG_OPMODE, sequencer_val | RF_OPMODE_SYNTHESIZER)
         elif newMode == RF69_MODE_STANDBY:
-            self.writeReg(REG_OPMODE, (self.readReg(REG_OPMODE) & 0xE3) | RF_OPMODE_STANDBY)
+            self.writeReg(REG_OPMODE, sequencer_val | RF_OPMODE_STANDBY)
         elif newMode == RF69_MODE_SLEEP:
-            self.writeReg(REG_OPMODE, (self.readReg(REG_OPMODE) & 0xE3) | RF_OPMODE_SLEEP)
+            self.writeReg(REG_OPMODE, sequencer_val | RF_OPMODE_SLEEP)
         else:
             return
 
@@ -406,7 +412,7 @@ class RFM69(object):
         if self.mode == RF69_MODE_RX and irqflags2 & RF_IRQFLAGS2_PAYLOADREADY:
             p = self.fetch_packet()
             p.rssi = rssi
-            logger.info(p)
+            logger.info("Packet received: %s " % p)
             if p.isAck():
                 self.recv_ack_queue.put(p)
             else:
